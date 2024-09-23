@@ -1,0 +1,7 @@
+# .gitignore content
+__pycache__/
+api_key.txt
+*.pyc
+*~
+.DS_Store
+venv/
