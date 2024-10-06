@@ -4,6 +4,7 @@ charset-normalizer==3.3.2
 click==8.1.7
 Flask==3.0.3
 greenlet==3.1.1
+gunicorn==23.0.0
 idna==3.10
 importlib_metadata==8.5.0
 itsdangerous==2.2.0
@@ -11,6 +12,7 @@ Jinja2==3.1.4
 MarkupSafe==2.1.5
 numpy==1.24.4
 oddsjam-api==0.2.9
+packaging==24.1
 pandas==2.0.3
 python-dateutil==2.9.0.post0
 pytz==2024.2

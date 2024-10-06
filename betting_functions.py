@@ -7,7 +7,6 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 from OddsJamClient import OddsJamClient
-
 def load_api_key(path):
     with open(path, 'r') as file:
         return file.readline().strip()
@@ -51,6 +50,14 @@ def fetch_sports_markets(api_key, sport, league, sportsbook=['Pinnacle']):
     else:
         print(f"Failed to fetch markets: {response.status_code} - {response.text}")
         return pd.DataFrame()
+def calculate_avg_odds(df):
+    # Convert odds to decimal if necessary and calculate avg_odds
+    df['decimal_odds_pinnacle'] = df['Odds_pinnacle'].apply(american_to_decimal)
+    df['decimal_odds_circa'] = df['Odds_circa'].apply(american_to_decimal)
+
+    # Calculate the average odds
+    df['avg_odds'] = df[['decimal_odds_pinnacle', 'decimal_odds_circa']].mean(axis=1)
+    return df
 
 # Get today's game IDs dynamically
 def get_todays_game_ids(api_key, league):
@@ -64,7 +71,7 @@ def get_todays_game_ids(api_key, league):
     return games_df['game_id'].tolist()
 
 # Fetch game data dynamically and filter based on player or game markets
-def fetch_game_data(game_ids, api_key, market_type='game', sport='baseball', league='MLB', sportsbooks=['Pinnacle', 'Caesars'], include_player_name=True):
+def fetch_game_data(game_ids, api_key, market_type='game', sport='baseball', league='MLB', sportsbooks=['Pinnacle', 'Circa Sports', 'Caesars'], include_player_name=True):
     markets_df = fetch_sports_markets(api_key, sport, league, sportsbooks)
 
     if market_type == 'player':
@@ -114,45 +121,82 @@ def fetch_game_data(game_ids, api_key, market_type='game', sport='baseball', lea
             rows.append(row)
     
     return pd.DataFrame(rows)
+def update_table_schema(conn, table_name, df):
+    cursor = conn.cursor()
+    
+    # Check if the table exists
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing_columns = [info[1] for info in cursor.fetchall()]
+
+    # Add missing columns if they don't exist
+    for col in df.columns:
+        if col not in existing_columns:
+            try:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN '{col}' TEXT")
+                print(f"Added missing column: {col}")
+            except sqlite3.OperationalError as e:
+                print(f"Error adding column {col}: {e}")
+    
+    conn.commit()
 
 # Find plus EV bets by merging sportsbook data and calculating EV
-def find_plus_ev_bets(df, threshold=5):
-    caesars_df = df[df['Sportsbook'] == 'Caesars']
+def find_plus_ev_bets(df, sportsbook, odds_threshold=10, threshold=5):
+    user_sportsbook_df = df[df['Sportsbook'] == sportsbook]
     pinnacle_df = df[df['Sportsbook'] == 'Pinnacle']
-    betmgm_df = df[df['Sportsbook'] == 'BetMGM'].rename(columns={'Odds': 'Odds_betmgm'})
+    circa_df = df[df['Sportsbook'] == 'Circa Sports'].rename(columns={'Odds': 'Odds_circa'})
     
-    merged_df = pd.merge(caesars_df, pinnacle_df, on=['Game ID', 'Bet Name', 'Market Name'], suffixes=('_caesars', '_pinnacle'))
-    merged_df = pd.merge(merged_df, betmgm_df, on=['Game ID', 'Bet Name', 'Market Name'], how='left')
+    merged_df = pd.merge(user_sportsbook_df, pinnacle_df, on=['Game ID', 'Bet Name', 'Market Name'], suffixes=('_user', '_pinnacle'))
+    merged_df = pd.merge(merged_df, circa_df, on=['Game ID', 'Bet Name', 'Market Name'], how='left')
     
-    merged_df['decimal_odds_caesars'] = merged_df['Odds_caesars'].apply(american_to_decimal)
+    # Convert odds to decimal
+    merged_df['decimal_odds_user'] = merged_df['Odds_user'].apply(american_to_decimal)
     merged_df['decimal_odds_pinnacle'] = merged_df['Odds_pinnacle'].apply(american_to_decimal)
-    merged_df['decimal_odds_betmgm'] = merged_df['Odds_betmgm'].apply(american_to_decimal)
-    
-    merged_df['implied_prob_caesars'] = merged_df['decimal_odds_caesars'].apply(implied_probability)
+    merged_df['decimal_odds_circa'] = merged_df['Odds_circa'].apply(american_to_decimal)
+
+    # Calculate implied probabilities
     merged_df['implied_prob_pinnacle'] = merged_df['decimal_odds_pinnacle'].apply(implied_probability)
+    merged_df['implied_prob_circa'] = merged_df['decimal_odds_circa'].apply(implied_probability)
+
+    # Average the true probabilities from Pinnacle and Circa
+    merged_df['true_prob_avg'] = merged_df[['implied_prob_pinnacle', 'implied_prob_circa']].mean(axis=1)
+    merged_df['true_prob_avg'] = merged_df['true_prob_avg'].apply(adjust_for_vig)
+
+    # Filter out odds that exceed the threshold
+    merged_df = merged_df[merged_df['decimal_odds_user'] <= odds_threshold]
+
+    # Calculate EV for user-specified sportsbook
+    merged_df['EV_user'] = merged_df.apply(lambda row: calculate_ev(row['true_prob_avg'], row['Odds_user']), axis=1)
     
-    merged_df['true_prob_pinnacle'] = merged_df['implied_prob_pinnacle'].apply(adjust_for_vig)
-    
-    merged_df['EV_caesars'] = merged_df.apply(lambda row: calculate_ev(row['true_prob_pinnacle'], row['Odds_caesars']), axis=1)
-    merged_df['EV_betmgm'] = merged_df.apply(lambda row: calculate_ev(row['true_prob_pinnacle'], row['Odds_betmgm']), axis=1)
-    
-    positive_ev_bets = merged_df[(merged_df['EV_caesars'] > threshold) | (merged_df['EV_betmgm'] > threshold)]
+    # Filter out bets that have EV above the threshold
+    positive_ev_bets = merged_df[merged_df['EV_user'] > threshold]
     return positive_ev_bets
 
-# Function to save the DataFrame to a SQL database using sqlite3
 def save_to_sql(df, league, conn, table_prefix='betting_data'):
     table_name = f"{table_prefix}_{league}"
+    # Add 'Odds_circa' and 'avg_odds' if they're not already in the DataFrame
+    if 'Odds_circa' not in df.columns:
+        df['Odds_circa'] = None  # Assign None or fetch the appropriate values
+
+    # Ensure 'avg_odds' is calculated before saving
+    if 'avg_odds' not in df.columns:
+        df = calculate_avg_odds(df)
+
+    # Ensure table schema matches the DataFrame
+    update_table_schema(conn, table_name, df)
+
+
+    # Now, save the DataFrame to the SQLite database
     df.to_sql(table_name, conn, if_exists='append', index=False)
 
 # Example main logic
-def get_ev_bets(api_key, sport, league, threshold=5):
+def get_ev_bets(api_key, sport, league, threshold=5, odds_threshold=10, sportsbook='Caesars'):
     game_ids = get_todays_game_ids(api_key, league)
     
-    player_props_df = fetch_game_data(game_ids, api_key, market_type='player', sport=sport, league=league, sportsbooks=['Pinnacle', 'Caesars'])
-    player_ev_bets = find_plus_ev_bets(player_props_df, threshold=threshold)
+    player_props_df = fetch_game_data(game_ids, api_key, market_type='player', sport=sport, league=league, sportsbooks=['Pinnacle', 'Circa Sports', sportsbook])
+    player_ev_bets = find_plus_ev_bets(player_props_df, sportsbook, odds_threshold=odds_threshold, threshold=threshold)
     
-    game_props_df = fetch_game_data(game_ids, api_key, market_type='game', sport=sport, league=league, sportsbooks=['Pinnacle', 'Caesars'])
-    game_ev_bets = find_plus_ev_bets(game_props_df, threshold=threshold)
+    game_props_df = fetch_game_data(game_ids, api_key, market_type='game', sport=sport, league=league, sportsbooks=['Pinnacle', 'Circa Sports', sportsbook])
+    game_ev_bets = find_plus_ev_bets(game_props_df, sportsbook, odds_threshold=odds_threshold, threshold=threshold)
     
     final_ev_df = pd.concat([player_ev_bets, game_ev_bets], ignore_index=True)
     

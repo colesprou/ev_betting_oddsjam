@@ -4,4 +4,5 @@ api_key.txt
 *.pyc
 *~
 .DS_Store
+betting_data.db
 venv/
