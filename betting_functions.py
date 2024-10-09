@@ -73,7 +73,6 @@ def get_todays_game_ids(api_key, league):
 # Fetch game data dynamically and filter based on player or game markets
 def fetch_game_data(game_ids, api_key, market_type='game', sport='baseball', league='MLB', sportsbooks=['Pinnacle', 'Circa Sports', 'Caesars'], include_player_name=True):
     markets_df = fetch_sports_markets(api_key, sport, league, sportsbooks)
-
     if market_type == 'player':
         markets = markets_df[markets_df['name'].str.contains('Player', case=False)]['name'].tolist()
     elif market_type == 'game':
@@ -81,7 +80,8 @@ def fetch_game_data(game_ids, api_key, market_type='game', sport='baseball', lea
     else:
         print(f"Unknown market type: {market_type}")
         return pd.DataFrame()
-
+    print(markets)
+    print(game_ids)
     url = "https://api-external.oddsjam.com/api/v2/game-odds"
     all_data = []
     
@@ -141,6 +141,7 @@ def update_table_schema(conn, table_name, df):
 
 # Find plus EV bets by merging sportsbook data and calculating EV
 def find_plus_ev_bets(df, sportsbook, odds_threshold=10, threshold=5):
+    print(df.columns)
     user_sportsbook_df = df[df['Sportsbook'] == sportsbook]
     pinnacle_df = df[df['Sportsbook'] == 'Pinnacle']
     circa_df = df[df['Sportsbook'] == 'Circa Sports'].rename(columns={'Odds': 'Odds_circa'})
