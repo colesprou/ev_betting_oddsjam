@@ -12,6 +12,5 @@ This Flask application calculates and displays positive expected value (EV) bets
 - **Python 3.8+**
 - **Flask**: Serves as the web framework for the application.
 - **Pandas**: Handles data manipulation and analysis.
-- **SQLite3**: Used for storing fetched data for further processing.
 
 ## Project Structure
